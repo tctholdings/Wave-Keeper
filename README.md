@@ -1,5 +1,13 @@
 # Wave Keeper
 
+> **Status: Archived / Paused — completed prototype experiment.**
+> Wave Keeper served its purpose as Game #1 in the BUILD → SHIP → EARN THE
+> FIRST $1 experiment: it proved out rapid vibe-coding with Claude Code and
+> a full concept-to-deployable-prototype loop. The game itself was judged
+> too simple to charge a stranger for, so it is not being monetized or
+> developed further. Code and history are left intact as-is. The next
+> game in the experiment lives in its own separate project.
+
 AI-assisted mobile strategy game experiment.
 
 **Objective:** DESIGN → BUILD → SHIP → EARN THE FIRST $1 FROM A STRANGER.
