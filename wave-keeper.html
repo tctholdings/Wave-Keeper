@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Wave Keeper</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+    height: 100%;
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100dvh;
+    padding: 10px;
+    gap: 8px;
+  }
+  h1 {
+    font-size: 18px;
+    margin: 4px 0 0 0;
+    letter-spacing: 0.5px;
+  }
+  #hud {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 420px;
+    font-size: 14px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 8px 12px;
+    gap: 6px;
+  }
+  #hud .stat { text-align: center; flex: 1; }
+  #hud .label { display: block; font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  #hud .value { display: block; font-size: 16px; font-weight: 700; }
+  #canvasWrap {
+    position: relative;
+    width: 100%;
+    max-width: 420px;
+    touch-action: none;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    touch-action: none;
+    user-select: none;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(13, 17, 23, 0.92);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 20px;
+    text-align: center;
+  }
+  #overlay.hidden { display: none; }
+  #overlay h2 { margin: 0; font-size: 22px; color: #f85149; }
+  #overlay p { margin: 2px 0; font-size: 14px; color: #c9d1d9; }
+  #overlay .best { color: #56d364; font-weight: 700; }
+  button#restartBtn {
+    margin-top: 8px;
+    padding: 12px 28px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #0d1117;
+    background: #56d364;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  button#restartBtn:active { background: #3fb950; }
+  #hint {
+    max-width: 420px;
+    width: 100%;
+    font-size: 12px;
+    color: #8b949e;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>🌊 Wave Keeper</h1>
+  <div id="hud">
+    <div class="stat"><span class="label">Currency</span><span class="value" id="statCurrency">0</span></div>
+    <div class="stat"><span class="label">Kills</span><span class="value" id="statKills">0</span></div>
+    <div class="stat"><span class="label">Leaks</span><span class="value" id="statLeaks">0/5</span></div>
+    <div class="stat"><span class="label">Wave</span><span class="value" id="statWave">1</span></div>
+  </div>
+  <div id="canvasWrap">
+    <canvas id="game"></canvas>
+    <div id="overlay" class="hidden">
+      <h2>Game Over</h2>
+      <p id="finalStats"></p>
+      <p class="best" id="bestStats"></p>
+      <button id="restartBtn">Restart</button>
+    </div>
+  </div>
+  <div id="hint">Tap an empty slot to build a turret. Turrets fire automatically. Don't let 5 enemies through.</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // CONFIG — all tuning knobs live here
+  // ---------------------------------------------------------------------
+  const CONFIG = {
+    canvasWidth: 390,
+    canvasHeight: 680,
+
+    laneTop: 300,
+    laneHeight: 80,
+
+    enemyRadius: 14,
+    enemySpeed: 45,           // px/sec, base
+    enemyBaseHealth: 30,
+    healthGrowthPerWave: 1.18, // multiplicative per wave
+    speedGrowthPerWave: 1.03,  // small speed creep per wave
+
+    waveDurationSec: 20,       // seconds of pressure per wave step
+    spawnIntervalStart: 2.0,   // seconds between spawns at wave 1
+    spawnIntervalMin: 0.6,
+    spawnIntervalDecayPerWave: 0.88,
+
+    turretRange: 115,
+    turretFireRate: 2,         // shots per second
+    turretDamage: 9,
+    turretRadius: 16,
+
+    bulletSpeed: 380,
+    bulletRadius: 4,
+
+    currencyStart: 90,
+    turretCost: 60,
+    killReward: 18,
+
+    maxLeaks: 5,
+    storageKey: "waveKeeperBest",
+
+    maxDeltaTime: 0.05 // clamp huge frame gaps (tab switch, etc.)
+  };
+
+  // Fixed build slots. Positions are chosen so each offers different
+  // coverage: distance from the lane centerline changes how long an
+  // enemy stays inside a turret's range circle, and position along the
+  // lane changes how much of that circle is clipped by the canvas edges.
+  const laneCenterY = CONFIG.laneTop + CONFIG.laneHeight / 2;
+  const SLOTS = [
+    { x: 70,  y: laneCenterY - 80 }, // top-early
+    { x: 195, y: laneCenterY - 120 }, // top-mid (farther from lane)
+    { x: 320, y: laneCenterY - 80 }, // top-late
+    { x: 70,  y: laneCenterY + 80 }, // bottom-early
+    { x: 195, y: laneCenterY + 120 }, // bottom-mid (farther from lane)
+    { x: 320, y: laneCenterY + 80 }  // bottom-late
+  ];
+
+  // ---------------------------------------------------------------------
+  // Flat game state
+  // ---------------------------------------------------------------------
+  let state = null;
+
+  function newState() {
+    return {
+      running: true,
+      elapsed: 0,
+      currency: CONFIG.currencyStart,
+      kills: 0,
+      leaks: 0,
+      wave: 1,
+      spawnTimer: 0,
+      enemies: [],   // {x, y, hp, maxHp, speed}
+      bullets: [],   // {x, y, target, speed, damage}
+      turrets: SLOTS.map(() => null) // null = empty slot, else {cooldown}
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // Canvas + input setup
+  // ---------------------------------------------------------------------
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  canvas.width = CONFIG.canvasWidth;
+  canvas.height = CONFIG.canvasHeight;
+
+  const overlay = document.getElementById("overlay");
+  const restartBtn = document.getElementById("restartBtn");
+  const finalStatsEl = document.getElementById("finalStats");
+  const bestStatsEl = document.getElementById("bestStats");
+  const statCurrency = document.getElementById("statCurrency");
+  const statKills = document.getElementById("statKills");
+  const statLeaks = document.getElementById("statLeaks");
+  const statWave = document.getElementById("statWave");
+
+  let toast = null; // { text, timeLeft }
+
+  function getBestScore() {
+    try {
+      const raw = localStorage.getItem(CONFIG.storageKey);
+      if (!raw) return { bestKills: 0, bestWave: 1 };
+      const parsed = JSON.parse(raw);
+      return {
+        bestKills: parsed.bestKills || 0,
+        bestWave: parsed.bestWave || 1
+      };
+    } catch (e) {
+      return { bestKills: 0, bestWave: 1 };
+    }
+  }
+
+  function saveBestScore(kills, wave) {
+    const current = getBestScore();
+    const updated = {
+      bestKills: Math.max(current.bestKills, kills),
+      bestWave: Math.max(current.bestWave, wave)
+    };
+    try {
+      localStorage.setItem(CONFIG.storageKey, JSON.stringify(updated));
+    } catch (e) {
+      // localStorage unavailable — ignore, not critical to gameplay
+    }
+    return updated;
+  }
+
+  function canvasCoordsFromEvent(evt) {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = evt.touches ? evt.touches[0].clientX : evt.clientX;
+    const clientY = evt.touches ? evt.touches[0].clientY : evt.clientY;
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY
+    };
+  }
+
+  function handleTap(evt) {
+    if (!state.running) return;
+    evt.preventDefault();
+    const { x, y } = canvasCoordsFromEvent(evt);
+
+    for (let i = 0; i < SLOTS.length; i++) {
+      const slot = SLOTS[i];
+      const dx = x - slot.x;
+      const dy = y - slot.y;
+      if (Math.sqrt(dx * dx + dy * dy) <= 30) {
+        tryBuildTurret(i);
+        return;
+      }
+    }
+  }
+
+  function tryBuildTurret(slotIndex) {
+    if (state.turrets[slotIndex] !== null) {
+      showToast("Slot occupied");
+      return;
+    }
+    if (state.currency < CONFIG.turretCost) {
+      showToast("Not enough currency");
+      return;
+    }
+    state.currency -= CONFIG.turretCost;
+    state.turrets[slotIndex] = { cooldown: 0, targetX: null, targetY: null };
+  }
+
+  function showToast(text) {
+    toast = { text: text, timeLeft: 1.0 };
+  }
+
+  canvas.addEventListener("click", handleTap);
+  canvas.addEventListener("touchstart", handleTap, { passive: false });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  document.addEventListener(
+    "touchmove",
+    (e) => {
+      if (e.target === canvas) e.preventDefault();
+    },
+    { passive: false }
+  );
+
+  restartBtn.addEventListener("click", () => {
+    overlay.classList.add("hidden");
+    state = newState();
+  });
+
+  // ---------------------------------------------------------------------
+  // Update logic
+  // ---------------------------------------------------------------------
+  function currentSpawnInterval() {
+    const interval =
+      CONFIG.spawnIntervalStart *
+      Math.pow(CONFIG.spawnIntervalDecayPerWave, state.wave - 1);
+    return Math.max(CONFIG.spawnIntervalMin, interval);
+  }
+
+  function currentEnemyHealth() {
+    return (
+      CONFIG.enemyBaseHealth *
+      Math.pow(CONFIG.healthGrowthPerWave, state.wave - 1)
+    );
+  }
+
+  function currentEnemySpeed() {
+    return (
+      CONFIG.enemySpeed * Math.pow(CONFIG.speedGrowthPerWave, state.wave - 1)
+    );
+  }
+
+  function spawnEnemy() {
+    const hp = currentEnemyHealth();
+    state.enemies.push({
+      x: -CONFIG.enemyRadius,
+      y: laneCenterY,
+      hp: hp,
+      maxHp: hp,
+      speed: currentEnemySpeed()
+    });
+  }
+
+  function update(dt) {
+    state.elapsed += dt;
+    state.wave = Math.floor(state.elapsed / CONFIG.waveDurationSec) + 1;
+
+    // Spawning
+    state.spawnTimer -= dt;
+    if (state.spawnTimer <= 0) {
+      spawnEnemy();
+      state.spawnTimer = currentSpawnInterval();
+    }
+
+    // Move enemies, check leaks
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+      const e = state.enemies[i];
+      e.x += e.speed * dt;
+      if (e.x - CONFIG.enemyRadius > CONFIG.canvasWidth) {
+        state.enemies.splice(i, 1);
+        state.leaks++;
+        if (state.leaks >= CONFIG.maxLeaks) {
+          endGame();
+          return;
+        }
+      }
+    }
+
+    // Turrets: acquire target (furthest-along enemy in range) and fire
+    SLOTS.forEach((slot, idx) => {
+      const turret = state.turrets[idx];
+      if (!turret) return;
+
+      turret.cooldown -= dt;
+
+      let best = null;
+      for (const e of state.enemies) {
+        const dx = e.x - slot.x;
+        const dy = e.y - slot.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist <= CONFIG.turretRange) {
+          if (!best || e.x > best.x) best = e;
+        }
+      }
+      turret.targetX = best ? best.x : null;
+      turret.targetY = best ? best.y : null;
+
+      if (best && turret.cooldown <= 0) {
+        state.bullets.push({
+          x: slot.x,
+          y: slot.y,
+          target: best,
+          speed: CONFIG.bulletSpeed,
+          damage: CONFIG.turretDamage
+        });
+        turret.cooldown = 1 / CONFIG.turretFireRate;
+      }
+    });
+
+    // Bullets: home toward target, apply damage on hit
+    for (let i = state.bullets.length - 1; i >= 0; i--) {
+      const b = state.bullets[i];
+      if (!b.target || b.target.hp <= 0 || !state.enemies.includes(b.target)) {
+        state.bullets.splice(i, 1);
+        continue;
+      }
+      const dx = b.target.x - b.x;
+      const dy = b.target.y - b.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const step = b.speed * dt;
+      if (step >= dist) {
+        b.target.hp -= b.damage;
+        state.bullets.splice(i, 1);
+      } else {
+        b.x += (dx / dist) * step;
+        b.y += (dy / dist) * step;
+      }
+    }
+
+    // Remove dead enemies, award currency + kills
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+      if (state.enemies[i].hp <= 0) {
+        state.enemies.splice(i, 1);
+        state.kills++;
+        state.currency += CONFIG.killReward;
+      }
+    }
+
+    if (toast) {
+      toast.timeLeft -= dt;
+      if (toast.timeLeft <= 0) toast = null;
+    }
+  }
+
+  function endGame() {
+    state.running = false;
+    const best = saveBestScore(state.kills, state.wave);
+    finalStatsEl.textContent =
+      "Kills: " + state.kills + "   Leaks: " + state.leaks + "   Wave reached: " + state.wave;
+    bestStatsEl.textContent =
+      "Best — Kills: " + best.bestKills + "   Wave: " + best.bestWave;
+    overlay.classList.remove("hidden");
+  }
+
+  // ---------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------
+  function draw() {
+    ctx.clearRect(0, 0, CONFIG.canvasWidth, CONFIG.canvasHeight);
+
+    // Lane
+    ctx.fillStyle = "#21262d";
+    ctx.fillRect(0, CONFIG.laneTop, CONFIG.canvasWidth, CONFIG.laneHeight);
+    ctx.strokeStyle = "#30363d";
+    ctx.strokeRect(0, CONFIG.laneTop, CONFIG.canvasWidth, CONFIG.laneHeight);
+
+    // Leak edge marker
+    ctx.fillStyle = "#f85149";
+    ctx.fillRect(CONFIG.canvasWidth - 4, CONFIG.laneTop, 4, CONFIG.laneHeight);
+
+    // Slots + turrets
+    SLOTS.forEach((slot, idx) => {
+      const turret = state.turrets[idx];
+      if (turret) {
+        // range ring (subtle)
+        ctx.beginPath();
+        ctx.arc(slot.x, slot.y, CONFIG.turretRange, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(88, 166, 255, 0.12)";
+        ctx.stroke();
+
+        // barrel toward target
+        if (turret.targetX !== null) {
+          ctx.strokeStyle = "#58a6ff";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(slot.x, slot.y);
+          const dx = turret.targetX - slot.x;
+          const dy = turret.targetY - slot.y;
+          const d = Math.sqrt(dx * dx + dy * dy) || 1;
+          ctx.lineTo(slot.x + (dx / d) * CONFIG.turretRadius, slot.y + (dy / d) * CONFIG.turretRadius);
+          ctx.stroke();
+          ctx.lineWidth = 1;
+        }
+
+        // turret body
+        ctx.beginPath();
+        ctx.arc(slot.x, slot.y, CONFIG.turretRadius, 0, Math.PI * 2);
+        ctx.fillStyle = "#58a6ff";
+        ctx.fill();
+      } else {
+        // empty slot
+        ctx.beginPath();
+        ctx.setLineDash([4, 4]);
+        ctx.arc(slot.x, slot.y, 22, 0, Math.PI * 2);
+        ctx.strokeStyle = state.currency >= CONFIG.turretCost ? "#56d364" : "#8b949e";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1;
+
+        ctx.fillStyle = "#c9d1d9";
+        ctx.font = "bold 16px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("+", slot.x, slot.y - 2);
+        ctx.font = "10px sans-serif";
+        ctx.fillText("$" + CONFIG.turretCost, slot.x, slot.y + 14);
+      }
+    });
+
+    // Bullets
+    ctx.fillStyle = "#f2cc60";
+    for (const b of state.bullets) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, CONFIG.bulletRadius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Enemies + health bars
+    for (const e of state.enemies) {
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, CONFIG.enemyRadius, 0, Math.PI * 2);
+      ctx.fillStyle = "#d29922";
+      ctx.fill();
+      ctx.strokeStyle = "#8b6914";
+      ctx.stroke();
+
+      const barW = 28;
+      const barH = 4;
+      const barX = e.x - barW / 2;
+      const barY = e.y - CONFIG.enemyRadius - 10;
+      const pct = Math.max(0, e.hp / e.maxHp);
+      ctx.fillStyle = "#490202";
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.fillStyle = pct > 0.5 ? "#56d364" : pct > 0.25 ? "#d29922" : "#f85149";
+      ctx.fillRect(barX, barY, barW * pct, barH);
+    }
+
+    // Toast
+    if (toast) {
+      ctx.globalAlpha = Math.min(1, toast.timeLeft * 2);
+      ctx.fillStyle = "#f85149";
+      ctx.font = "bold 14px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(toast.text, CONFIG.canvasWidth / 2, CONFIG.laneTop - 20);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function updateHud() {
+    statCurrency.textContent = "$" + state.currency;
+    statKills.textContent = state.kills;
+    statLeaks.textContent = state.leaks + "/" + CONFIG.maxLeaks;
+    statWave.textContent = state.wave;
+  }
+
+  // ---------------------------------------------------------------------
+  // Main loop — requestAnimationFrame + delta time
+  // ---------------------------------------------------------------------
+  let lastTime = null;
+
+  function loop(timestamp) {
+    if (lastTime === null) lastTime = timestamp;
+    let dt = (timestamp - lastTime) / 1000;
+    dt = Math.min(dt, CONFIG.maxDeltaTime);
+    lastTime = timestamp;
+
+    if (state.running) {
+      update(dt);
+    }
+    draw();
+    updateHud();
+
+    requestAnimationFrame(loop);
+  }
+
+  state = newState();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
